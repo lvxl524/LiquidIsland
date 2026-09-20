@@ -8,46 +8,45 @@
 
 到 [Releases](https://github.com/lvxl524/LiquidIsland/releases) 按你的越狱选一个装：
 
-| 文件 | 适用 | Depends | 说明 |
-|---|---|---|---|
-| `com.mekabrine.liquidisland_1.6.0_roothide_iphoneos-arm64.deb` | **隐根**（RootHide） | `firmware (>= 16.0)` | **RootHide 原生形态**：根相对路径 + `iphoneos-arm64e` + 二进制内 0 处 `/var/jb`，**装上即用，无需再做 rootless→roothide 转换** |
-| `com.mekabrine.liquidisland_1.6.0_rootless_iphoneos-arm64.deb` | **无根**（Dopamine / palera1n rootless） | `mobilesubstrate, preferenceloader, firmware (>= 16.0)` | 标准 rootless 包 |
+| 文件 | 适用 | Depends |
+|---|---|---|
+| `…_1.6.0_roothide_iphoneos-arm64.deb` | **隐根**（RootHide） | `firmware (>= 16.0)` |
+| `…_1.6.0_rootless_iphoneos-arm64.deb` | **无根**（Dopamine / palera1n rootless） | `mobilesubstrate, preferenceloader, firmware (>= 16.0)` |
 
-包 ID 保持 `com.mekabrine.liquidisland`，可直接覆盖已装的 1.5.0。安装后建议注销（respring）。
+两个包都是 **arm64 + arm64e 双架构**。`Preferences` 是 arm64e 进程，dyld 会拒绝纯 arm64 的 bundle（`have 'arm64', need 'arm64e'`），所以不能只留 arm64。包 ID 保持 `com.mekabrine.liquidisland`，可直接覆盖已装的 1.5.0，装完建议注销。
 
 ## 1.6.0 变更
 
-### ① 修复「点进设置就闪退」（SIGBUS）
+### ① 修复「点进设置就闪退」（SIGBUS / `EXC_ARM_PAC_FAIL`）
 
-- 崩溃点：`Preferences` 加载 `LiquidIslandPrefs` 主类时，`libobjc` 的 `readClass` 触发 `EXC_BAD_ACCESS (SIGBUS)`，异常码 `0x105`（`EXC_ARM_PAC_FAIL`）。
-- 根因：原包是 **arm64 + arm64e** 双架构，其 **arm64e slice** 的 `class_ro_t::baseMethods` 等指针带**指针认证（PAC）**，而该二进制并非标准工具链产物（`LC_FUNCTION_STARTS` 丢失 `LC_REQ_DYLD`、`__TEXT` 节区异常右对齐），PAC 订正不可靠 → 未认证的签名指针被当普通地址用 → 非规范地址 → 闪退。
-- 修法：**改为纯 arm64**。arm64 slice 使用 `DYLD_CHAINED_PTR_64_OFFSET`，**指针认证 fixup 为 0 条**，这类崩溃从根上消失；arm64 slice 在 arm64e 进程照常加载。
-- 顺带：`LC_FUNCTION_STARTS` 修正为 `0x80000026`，补上 `NSPrincipalClass`。
-- 副作用：体积减半（`LiquidIslandPrefs` 165,920 → 67,616 B，`LiquidIsland.dylib` 238,016 → 106,944 B）。
+崩溃现场（iPhone 15 Pro Max / iOS 17.2.1）：`Preferences` 加载 `LiquidIslandPrefs` 时，`libobjc readClass` 内 `EXC_BAD_ACCESS (SIGBUS)`，异常码 `0x105`。
+
+**根因**：上游二进制被安装期补丁改写过 load command（install name、rpath）却**没有重新签名**——arm64 slice 的 CodeDirectory 第 0 页哈希失配；同时它的 arm64e slice 用 `LC_DYLD_CHAINED_FIXUPS`（指针认证 fixup）声明重定位，而 RootHide 的安装期补丁只按 `LC_DYLD_INFO` 形态处理。结果 arm64e slice 的指针认证 fixup 没被正确套用，`class_ro_t::baseMethods` 这类 PAC 指针带着签名被当普通地址解引用 → 非规范地址 → `readClass` 崩。
+
+**修法**（三条一起做）：
+
+1. **arm64e slice 的重定位形态改为 `LC_DYLD_INFO`** —— 与设备上能正常工作的同工具链产物（`SplitJumpPrefs`）完全同构：`rebase=0/0`，`bind` 流用 `THREADED_BIND`（`0xD0 <表大小>` → 逐符号 `SET_SYMBOL_TRAILING_FLAGS_IMM` + `DO_BIND` → `SET_SEGMENT_AND_OFFSET_ULEB` + `THREADED_BIND 0x01` → `DONE`）。数据区里的 ARM64E 链式编码**原样保留**，由 dyld 沿链套用。
+2. **补齐/修正 load command**：`LC_FUNCTION_STARTS` 恢复 `LC_REQ_DYLD`（上游写成 `0x26`）；`Info.plist` 补 `NSPrincipalClass`。
+3. **两个 slice 全部重签**：按 CodeDirectory 口径逐页重算哈希，arm64 与 arm64e 各 17/17、26/26 页全部匹配（上游原本第 0 页就是失配的）。
 
 ### ② 设置面板完整汉化
 
-- 入口与面板标题：**Liquid Island 灵动岛**
-- 全部开关 / 分组 / 滑块说明汉化
-- 去掉原包 `Root.plist` 的重复项（`CornerRadius` 出现两次、两个分组重复），25 → 22 项
+入口与面板标题「Liquid Island 灵动岛」，全部开关/分组/滑块中文化；并去掉上游 `Root.plist` 的重复项（`CornerRadius` 两次、两个分组重复），25 → 22 项。
 
 ### ③ 打包修正
 
-- `data.tar.gz` 取代原来的 `data.tar.lzma`（Sileo / Zebra 兼容）
+- `data.tar.gz` 取代上游 `data.tar.lzma`（Sileo / Zebra 兼容）
 - 隐根包 `Depends` 只留 `firmware (>= 16.0)`，任何 rootless 环境都能装
 
-### ④ 隐根包改为 RootHide 原生形态（v1.6.0 追加修正）
+### ④ 隐根包为 RootHide 原生形态
 
-初版隐根包只是「改了 `Depends` 的 rootless 包」，装到 RootHide 上仍需手动转换。对照本账号 `SplitJump` 1.5.0 的两个官方变体逐字节比对后，已改为真正的原生形态：
+对照本账号 `SplitJump` 1.5.0 的 rootless / roothide 两个官方变体逐字节比对得出的差异，全部套上：
 
 | | rootless | **roothide 原生** |
 |---|---|---|
 | data 路径 | `./var/jb/Library/…` | **`./Library/…`**（RootHide 的 dpkg 把 `/` 映射进 jbroot） |
 | Architecture | `iphoneos-arm64` | **`iphoneos-arm64e`** |
-| 二进制内 `/var/jb` | 保留（rootless 语义正确） | **0 处**：install name 改为 `/Library/…`、`/var/jb` rpath 改为 `/Library/…` 与 `/usr/lib` |
-| 代码签名 | — | 改写 `__TEXT` 后按 CodeDirectory 口径**整包重签**（`hashType=2` SHA-256，逐页哈希全部匹配） |
-
-> 原包的代码签名在 arm64 slice 第 0 页本就失配（roothide 补丁改过 load command 未重签），本次重签后两个二进制均 100% 页匹配。
+| 二进制内 `/var/jb` | 保留 | **0 处**（install name / rpath 原位改写为根相对路径） |
 
 ## 设置项（汉化对照）
 
@@ -66,8 +65,7 @@
 
 ## 复现构建
 
-本仓库不含上游源码（上游只发布了二进制 deb），`tools/repack.py` 用于从任意一份
-Liquid Island deb **确定性**地重打包出上述两个变体（含汉化、架构修正与隐根形态转换）：
+本仓库不含上游源码（上游只发了二进制 deb），`tools/repack.py` 从任意一份 Liquid Island deb 确定性地重打包出上述两个变体（双架构、汉化、架构与签名修正、隐根形态转换）：
 
 ```bash
 python tools/repack.py --in LiquidIsland_1.5.0.deb --out-dir out --version 1.6.0
